@@ -1,0 +1,13 @@
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+reference_voices/*
+!reference_voices/.gitkeep
+output/*
+!output/.gitkeep
+.pytest_cache/
+.DS_Store

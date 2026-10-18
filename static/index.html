@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<title>Clonador de voz local</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: #12141a;
+    color: #eaeaea;
+    max-width: 720px;
+    margin: 40px auto;
+    padding: 0 20px;
+  }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  p.subtitle { color: #9a9fae; margin-top: 0; margin-bottom: 28px; }
+  .card {
+    background: #1b1e27;
+    border: 1px solid #2a2e3a;
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin-bottom: 18px;
+  }
+  label { display: block; font-size: 13px; color: #9a9fae; margin-bottom: 6px; }
+  select, textarea, input[type=file] {
+    width: 100%;
+    background: #12141a;
+    color: #eaeaea;
+    border: 1px solid #2a2e3a;
+    border-radius: 6px;
+    padding: 10px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+  textarea { min-height: 110px; resize: vertical; }
+  .row { display: flex; gap: 10px; margin-top: 12px; }
+  button {
+    background: #4f6bff;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 10px 16px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button.secondary { background: #2a2e3a; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .voces-lista { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .voz-chip {
+    padding: 6px 10px;
+    border-radius: 20px;
+    border: 1px solid #2a2e3a;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .voz-chip.activa { background: #4f6bff; border-color: #4f6bff; }
+  audio { width: 100%; margin-top: 12px; }
+  #estado { font-size: 13px; color: #9a9fae; margin-top: 8px; min-height: 18px; }
+</style>
+</head>
+<body>
+
+<h1>Clonador de voz local</h1>
+<p class="subtitle">Texto → Gemini (tono) → XTTS v2 (tu voz)</p>
+
+<div class="card">
+  <label>Clips de referencia de tu voz (reference_voices/*.wav)</label>
+  <div class="voces-lista" id="voces-lista"></div>
+  <div class="row">
+    <input type="file" id="input-voz" accept=".wav" />
+    <button class="secondary" onclick="subirVoz()">Subir</button>
+  </div>
+</div>
+
+<div class="card">
+  <label>Tono</label>
+  <select id="select-tono"></select>
+
+  <label style="margin-top:12px">Texto</label>
+  <textarea id="texto" placeholder="Escribe lo que quieres decir..."></textarea>
+
+  <div class="row">
+    <button class="secondary" onclick="generarTexto()">✨ Reescribir con Gemini</button>
+    <button onclick="sintetizar()">🔊 Convertir a voz</button>
+  </div>
+  <div id="estado"></div>
+  <audio id="player" controls style="display:none"></audio>
+</div>
+
+<script>
+const estado = document.getElementById('estado');
+let vocesSeleccionadas = new Set();
+
+async function cargarTonos() {
+  const res = await fetch('/api/tonos');
+  const tonos = await res.json();
+  const select = document.getElementById('select-tono');
+  select.innerHTML = '';
+  Object.keys(tonos).forEach(t => {
+    const opt = document.createElement('option');
+    opt.value = t;
+    opt.textContent = t;
+    select.appendChild(opt);
+  });
+}
+
+async function cargarVoces() {
+  const res = await fetch('/api/voces');
+  const data = await res.json();
+  const cont = document.getElementById('voces-lista');
+  cont.innerHTML = '';
+  data.voces.forEach(v => {
+    const chip = document.createElement('div');
+    chip.className = 'voz-chip' + (vocesSeleccionadas.has(v) ? ' activa' : '');
+    chip.textContent = v;
+    chip.onclick = () => {
+      vocesSeleccionadas.has(v) ? vocesSeleccionadas.delete(v) : vocesSeleccionadas.add(v);
+      cargarVoces();
+    };
+    cont.appendChild(chip);
+  });
+}
+
+async function subirVozImpl() {
+  const input = document.getElementById('input-voz');
+  if (!input.files.length) { estado.textContent = 'Selecciona un archivo .wav primero.'; return; }
+  const fd = new FormData();
+  fd.append('file', input.files[0]);
+  estado.textContent = 'Subiendo...';
+  try {
+    const res = await fetch('/api/subir-voz', { method: 'POST', body: fd });
+    const crudo = await res.text();
+    if (!res.ok) { estado.textContent = 'Error: ' + extraerError(res, crudo); return; }
+    input.value = '';
+    estado.textContent = 'Listo.';
+    cargarVoces();
+  } catch (e) {
+    estado.textContent = 'No se pudo conectar con el servidor: ' + e.message;
+  }
+}
+const subirVoz = conBotonesDeshabilitados(subirVozImpl);
+
+function extraerError(res, textoCrudo) {
+  try {
+    const data = JSON.parse(textoCrudo);
+    return data.detail || textoCrudo;
+  } catch {
+    return textoCrudo || `Error ${res.status}`;
+  }
+}
+
+function conBotonesDeshabilitados(fn) {
+  return async (...args) => {
+    const botones = document.querySelectorAll('button');
+    botones.forEach(b => b.disabled = true);
+    try {
+      await fn(...args);
+    } finally {
+      botones.forEach(b => b.disabled = false);
+    }
+  };
+}
+
+async function generarTextoImpl() {
+  const texto = document.getElementById('texto').value.trim();
+  const tono = document.getElementById('select-tono').value;
+  if (!texto) { estado.textContent = 'Escribe algo de texto primero.'; return; }
+  estado.textContent = 'Generando texto con Gemini...';
+  try {
+    const res = await fetch('/api/generar-texto', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ texto, tono })
+    });
+    const crudo = await res.text();
+    if (!res.ok) { estado.textContent = 'Error: ' + extraerError(res, crudo); return; }
+    const data = JSON.parse(crudo);
+    document.getElementById('texto').value = data.texto;
+    estado.textContent = 'Texto actualizado.';
+  } catch (e) {
+    estado.textContent = 'No se pudo conectar con el servidor: ' + e.message;
+  }
+}
+
+async function sintetizarImpl() {
+  const texto = document.getElementById('texto').value.trim();
+  if (!texto) { estado.textContent = 'Escribe algo de texto primero.'; return; }
+  if (vocesSeleccionadas.size === 0) {
+    estado.textContent = 'Selecciona al menos un clip de referencia de voz.';
+    return;
+  }
+  estado.textContent = 'Sintetizando audio... (puede tardar, sobre todo la primera vez)';
+  try {
+    const res = await fetch('/api/sintetizar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ texto, voces_referencia: Array.from(vocesSeleccionadas) })
+    });
+    const crudo = await res.text();
+    if (!res.ok) { estado.textContent = 'Error: ' + extraerError(res, crudo); return; }
+    const data = JSON.parse(crudo);
+    const player = document.getElementById('player');
+    player.src = '/api/audio/' + data.archivo;
+    player.style.display = 'block';
+    player.play();
+    estado.textContent = 'Listo.';
+  } catch (e) {
+    estado.textContent = 'No se pudo conectar con el servidor: ' + e.message;
+  }
+}
+
+const generarTexto = conBotonesDeshabilitados(generarTextoImpl);
+const sintetizar = conBotonesDeshabilitados(sintetizarImpl);
+
+cargarTonos();
+cargarVoces();
+</script>
+</body>
+</html>
